@@ -1,0 +1,216 @@
+-- ==========================================
+-- GOLDEN FLIGHTS: SPRINT 1
+-- Core database tables
+-- ==========================================
+
+-- 1. USERS
+CREATE TABLE users (
+    user_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    email VARCHAR(320) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'Passenger'
+        CHECK (role IN ('Passenger', 'Staff')),
+    auto_delete_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Email addresses are unique regardless of capitalization.
+CREATE UNIQUE INDEX uq_users_email_lower
+ON users (LOWER(email));
+
+
+-- 2. FLIGHTS
+CREATE TABLE flights (
+    flight_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    flight_number VARCHAR(20) NOT NULL,
+    airline VARCHAR(100) NOT NULL,
+    departure_city VARCHAR(100) NOT NULL,
+    arrival_city VARCHAR(100) NOT NULL,
+    departure_datetime TIMESTAMPTZ NOT NULL,
+    arrival_datetime TIMESTAMPTZ NOT NULL,
+    base_price NUMERIC(10, 2) NOT NULL
+        CHECK (base_price >= 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'Scheduled'
+        CHECK (status IN ('Scheduled', 'Cancelled')),
+
+    CONSTRAINT chk_flight_times
+        CHECK (arrival_datetime > departure_datetime)
+);
+
+-- Supports flight search by route and departure date.
+CREATE INDEX idx_flights_route_departure
+ON flights (departure_city, arrival_city, departure_datetime);
+
+
+-- 3. SEATS
+CREATE TABLE seats (
+    seat_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    flight_id INTEGER NOT NULL
+        REFERENCES flights(flight_id) ON DELETE CASCADE,
+    seat_number VARCHAR(10) NOT NULL,
+    seat_class VARCHAR(20) NOT NULL
+        CHECK (seat_class IN ('Economy', 'Business')),
+    seat_fee NUMERIC(10, 2) NOT NULL DEFAULT 0
+        CHECK (seat_fee >= 0),
+
+    -- A seat number cannot appear twice on the same flight.
+    CONSTRAINT uq_seats_flight_seat_number
+        UNIQUE (flight_id, seat_number),
+
+    -- Supports the composite foreign key in bookings.
+    CONSTRAINT uq_seats_flight_seat_id
+        UNIQUE (flight_id, seat_id)
+);
+
+
+-- 4. BOOKINGS
+CREATE TABLE bookings (
+    booking_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    booking_reference VARCHAR(30) NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL
+        REFERENCES users(user_id) ON DELETE RESTRICT,
+    flight_id INTEGER NOT NULL
+        REFERENCES flights(flight_id) ON DELETE RESTRICT,
+    seat_id INTEGER,
+    status VARCHAR(20) NOT NULL DEFAULT 'Confirmed'
+        CHECK (status IN ('Confirmed', 'Changed', 'Cancelled')),
+    booked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Prevents two bookings from holding the same seat.
+    CONSTRAINT uq_bookings_flight_seat
+        UNIQUE (flight_id, seat_id),
+
+    -- Ensures the selected seat belongs to this booking's flight.
+    CONSTRAINT fk_bookings_flight_seat
+        FOREIGN KEY (flight_id, seat_id)
+        REFERENCES seats (flight_id, seat_id)
+);
+
+CREATE INDEX idx_bookings_user_id
+ON bookings (user_id);
+
+CREATE INDEX idx_bookings_flight_id
+ON bookings (flight_id);
+
+
+-- 5. PAYMENTS
+CREATE TABLE payments (
+    payment_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    booking_id INTEGER NOT NULL
+        REFERENCES bookings(booking_id) ON DELETE CASCADE,
+    amount NUMERIC(10, 2) NOT NULL
+        CHECK (amount >= 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'Pending'
+        CHECK (status IN ('Pending', 'Paid', 'Failed')),
+    gateway_transaction_id VARCHAR(255),
+    receipt_number VARCHAR(50) UNIQUE,
+    email_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    paid_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_payments_booking_id
+ON payments (booking_id);
+
+
+-- Automatically update bookings.updated_at on modification.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_bookings_updated_at
+BEFORE UPDATE ON bookings
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- ==========================================
+-- GOLDEN FLIGHTS: SPRINT 2
+-- Additional functionality
+-- ==========================================
+
+-- Add the staff member who created a flight.
+-- Nullable because existing flights may not have a creator.
+ALTER TABLE flights
+ADD COLUMN created_by INTEGER
+    REFERENCES users(user_id) ON DELETE SET NULL;
+
+
+-- Add accessibility and special requirements.
+ALTER TABLE bookings
+ADD COLUMN accessibility_notes TEXT;
+
+
+-- 6. BOOKING_CHARGES
+CREATE TABLE booking_charges (
+    charge_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    booking_id INTEGER NOT NULL
+        REFERENCES bookings(booking_id) ON DELETE CASCADE,
+    charge_type VARCHAR(20) NOT NULL
+        CHECK (
+            charge_type IN (
+                'Base fare',
+                'Tax',
+                'Seat fee',
+                'Service'
+            )
+        ),
+    description VARCHAR(255) NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL
+        CHECK (amount >= 0)
+);
+
+CREATE INDEX idx_booking_charges_booking_id
+ON booking_charges (booking_id);
+
+-- ==========================================
+-- GOLDEN FLIGHTS: SPRINT 3
+-- Cancellation and reporting
+-- ==========================================
+
+-- 7. CANCELLATION_POLICIES
+CREATE TABLE cancellation_policies (
+    policy_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    min_hours_before_departure INTEGER NOT NULL
+        CHECK (min_hours_before_departure >= 0),
+    fee_amount NUMERIC(10, 2) NOT NULL
+        CHECK (fee_amount >= 0),
+    refund_percent NUMERIC(5, 2) NOT NULL
+        CHECK (refund_percent >= 0 AND refund_percent <= 100),
+
+    -- Each cancellation deadline tier must be unique.
+    CONSTRAINT uq_cancellation_policy_tier
+        UNIQUE (min_hours_before_departure)
+);
+
+
+-- Add check-in information to bookings.
+ALTER TABLE bookings
+ADD COLUMN check_in_status VARCHAR(30) NOT NULL
+    DEFAULT 'Not checked in'
+    CHECK (
+        check_in_status IN (
+            'Not checked in',
+            'Checked in'
+        )
+    );
+
+
+-- Record when a booking was cancelled.
+ALTER TABLE bookings
+ADD COLUMN cancelled_at TIMESTAMPTZ;
+
+
+-- Store the refund calculated at cancellation time.
+ALTER TABLE bookings
+ADD COLUMN refund_amount NUMERIC(10, 2)
+    CHECK (refund_amount IS NULL OR refund_amount >= 0);
+
+
+CREATE INDEX idx_cancellation_policies_min_hours
+ON cancellation_policies (min_hours_before_departure);

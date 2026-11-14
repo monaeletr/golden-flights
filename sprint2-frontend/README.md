@@ -1,16 +1,55 @@
-# React + Vite
+# GoldenFlights Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+## Overview
 
-Currently, two official plugins are available:
+The GoldenFlights frontend is a React application built with Vite. It provides the user interface for searching and booking flights, managing bookings, and accessing staff features.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Main Features
 
-## React Compiler
+- **User login:** Passengers and staff sign in through the application.
+- **Role-based access:** The interface displays the appropriate features based on the role returned by the backend.
+- **Flight booking:** Users can go through the flight-booking process and enter passenger details.
+- **Accessibility information:** Passengers can provide accessibility-related notes as part of their booking.
+- **Mock checkout:** A simulated payment step is provided for testing. It does not process a real payment.
+- **Booking management:** Passengers can view their bookings and use the available options to change or cancel a booking.
+- **Staff dashboard:** Staff members can access the staff view and manage booking-related information.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Technology
 
-## Expanding the Oxlint configuration
+- React
+- Vite
+- JavaScript
+- CSS
+- Backend communication through HTTP API requests
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Running the Frontend
+
+1. Open a terminal.
+2. Navigate to the frontend directory:
+
+   ```bash
+   cd frontend
+   ```
+
+3. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+4. Start the development server:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open the local URL printed by Vite in the terminal (usually `http://localhost:5173`).
+
+## Backend Requirement
+
+The backend API must also be running for login, booking, and staff features to work. Start it separately from the `backend-api` directory using `npm run dev`.
+
+## Notes
+
+- The mock checkout is for development/testing only.
+- Booking and user data are handled by the backend and stored in the connected database.

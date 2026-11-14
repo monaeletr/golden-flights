@@ -1,4 +1,4 @@
-# Airline Reservation Back End - Sprint 1
+# Airline Reservation Back End - Sprints 1 and 2
 
 Node.js + Express + PostgreSQL.
 
@@ -7,7 +7,7 @@ Node.js + Express + PostgreSQL.
 
 ## Setup
 
-The database tables already exist in Supabase (see `backend-database/sql/SqlScripts.txt`), so do not run any CREATE TABLE script again. This API only needs the Sprint 1 tables and works fine with the extra Sprint 2/3 columns.
+The database tables already exist in Supabase (see `backend-database/sql/SqlScripts.txt`), so do not run any CREATE TABLE script again. This API needs the Sprint 1 **and Sprint 2** parts of that script (`flights.created_by`, `bookings.accessibility_notes` and the `booking_charges` table), so run the Sprint 2 section in Supabase if it isn't there yet. Sprint 3 columns are not used.
 
 ```bash
 cd backend-api
@@ -29,7 +29,7 @@ Send `Authorization: Bearer <token>` on every endpoint marked **Auth**. Tokens c
 
 | Story | Method & path | Auth | Notes |
 |---|---|---|---|
-| UI-01 | `POST /api/auth/register` | - | `{ firstName, lastName, email, password }`. Password 8+ chars. Always creates a `passenger`. |
+| UI-01 | `POST /api/auth/register` | - | `{ firstName, lastName, email, password }`. Password 8+ chars. Always creates a `Passenger`. |
 | UI-01 | `POST /api/auth/login` | - | `{ email, password }` returns `{ token, user }` |
 | UI-01 | `GET /api/auth/me` | Auth | Current user |
 | UI-03 | `PATCH /api/auth/me/preferences` | Auth | `{ autoDeleteEnabled: boolean }` |

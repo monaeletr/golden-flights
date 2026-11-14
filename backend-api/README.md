@@ -1,6 +1,9 @@
 # Airline Reservation Back End - Sprint 1
 
-Node.js + Express + PostgreSQL. Covers UI-01, UI-03, UI-05, UI-08, UI-09.
+Node.js + Express + PostgreSQL.
+
+- **Sprint 1:** UI-01, UI-03, UI-05, UI-08, UI-09
+- **Sprint 2:** UI-02, UI-04, UI-06, REP-03, REP-04, REP-05
 
 ## Setup
 
@@ -35,11 +38,31 @@ Send `Authorization: Bearer <token>` on every endpoint marked **Auth**. Tokens c
 | UI-08 | `GET /api/flights/:flightId` | - | One flight |
 | UI-05 | `GET /api/flights/:flightId/seats` | - | Seat map with `available` flag |
 | UI-05 | `PUT /api/bookings/:bookingId/seat` | Auth | `{ seatId }`. Choose or change a seat. |
-| UI-09 | `POST /api/bookings` | Auth | `{ flightId, seatId?, paymentToken }`. Books and pays; returns booking + receipt. |
+| UI-09 | `POST /api/bookings` | Auth | `{ flightId, seatId?, accessibilityNotes?, paymentToken }`. Books and pays; returns booking with `pricing` and receipt. |
+| UI-06 | `GET /api/flights/:flightId/quote?seatId=` | - | Price breakdown (`charges[]`, `total`) to show before paying. `seatId` optional. |
+| UI-04 | `PATCH /api/bookings/:bookingId/accessibility` | Auth | `{ accessibilityNotes }` (max 1000 chars, `""` clears). Also accepted when booking. |
 | UI-03 | `GET /api/bookings?view=current\|previous\|all` | Auth | Own bookings (staff: all, or `&userId=`) |
 | UI-03 | `GET /api/bookings/:bookingId` | Auth | Owner or staff |
 | UI-03 | `GET /api/bookings/reference/:reference` | Auth | Lookup by booking code |
 | UI-03 | `POST /api/bookings/:bookingId/cancel` | Auth | Sets `Cancelled`, frees the seat |
+
+### Staff only (UI-02) - role `Staff`
+
+| Story | Method & path | Notes |
+|---|---|---|
+| REP-05 | `GET /api/staff/flights` | All flights incl. cancelled/past, with `totalSeats` and `activeBookings`. Optional `?status=Scheduled\|Cancelled`. |
+| REP-05 | `POST /api/staff/flights` | `{ flightNumber, airline, departureCity, arrivalCity, departureDatetime, arrivalDatetime, basePrice, status?, seatMap? }`. Dates need a time zone (e.g. `2026-12-01T09:30:00-05:00`). Seats are generated so passengers can choose seats. |
+| REP-05 | `PATCH /api/staff/flights/:flightId` | Any of the same fields. Departed flights can't be edited. `status: "Cancelled"` hides the flight from search. |
+| REP-04 | `GET /api/staff/flights/:flightId/passengers` | One row per ticket, ordered by passenger ID (`users.user_id`). `?includeCancelled=true` to include cancelled tickets. |
+| REP-03 | `GET /api/staff/flights/:flightId/accessibility` | Notes identified by seat number only (no names/contact). Bookings with notes but no seat yet appear last with their booking reference. |
+
+`seatMap` is optional: `{ rows: 20, columns: "ABCDEF", businessRows: 3, businessSeatFee: 0, economySeatFee: 0 }` (those are the defaults; `rows: 0` creates no seats).
+
+Staff can also use the passenger endpoints above, plus: list/open **any** booking (`GET /api/bookings`, optional `?userId=`) and cancel any booking.
+
+### Roles and permissions (UI-02)
+
+Defined in `src/middleware/permissions.js`. The user object returned by login/register/`/me` includes a `permissions` array so the front end can show or hide features. The server checks the role against the database on every request, so promoting or demoting someone takes effect immediately.
 
 Errors are `{ "error": "message", "details": {...} }` with these statuses: 400 validation, 401 not logged in, 402 payment failed, 404 not found, 409 conflict (e.g. seat taken).
 
@@ -52,7 +75,8 @@ Errors are `{ "error": "message", "details": {...} }` with these statuses: 400 v
 ## Assumptions to check against your backlog
 
 - **Book + pay is one call.** The booking holds the seat while the gateway is charged. If payment fails, the booking is cancelled and the seat is freed, so unpaid bookings never block seats.
-- **Seat fees are not charged yet.** The amount is `flights.base_price`; Sprint 2 adds `seats.seat_fee` (marked in `routes/bookings.js`).
+- **Price breakdown (UI-06)** is saved in `booking_charges`: Base fare = `flights.base_price`; Seat fee = the chosen seat's `seat_fee` (line omitted when 0); Service = `SERVICE_FEE` (default 0, omitted when 0); Tax = `TAX_RATE` (default 13%) of everything before tax. Set both in `.env` and confirm the rates with your team.
+- **Changing a seat recalculates the charges** but does not charge or refund the difference automatically. The booking shows it as `pricing.balanceDue` (positive = passenger owes, negative = overpaid). Refunds belong to Sprint 3.
 - **Seat change sets `Changed`.** Choosing a first seat leaves the status `Confirmed`; replacing an existing seat marks the booking `Changed`.
 - **Current vs previous bookings** is derived from the flight's departure time and cancellation status.
 - **Flight search dates** use UTC day boundaries.
@@ -62,5 +86,5 @@ Errors are `{ "error": "message", "details": {...} }` with these statuses: 400 v
 
 - `services/paymentGateway.js` and `services/mailer.js` are stubs. Use token `tok_fail` to test a declined payment.
 - If the server crashes after a successful charge but before the receipt is saved, the stale-payment job would cancel a paid booking. Use gateway idempotency keys or webhooks to close that gap.
-- Cancelling does not issue a refund.
+- Cancelling does not issue a refund (Sprint 3: `cancellation_policies`, `refund_amount`, check-in are not implemented here).
 - Auto-delete also removes the payment/receipt rows for deleted bookings. Check this against your record-retention requirements.

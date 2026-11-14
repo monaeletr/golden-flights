@@ -40,7 +40,17 @@ function generateReceiptNumber() {
   return `RCP-${d}-${randomCode(10)}`;
 }
 
+// UI-04: optional free text, up to 1000 characters. Empty means "none".
+function parseAccessibilityNotes(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new HttpError(400, 'accessibilityNotes must be text');
+  const trimmed = value.trim();
+  if (trimmed.length > 1000) throw new HttpError(400, 'accessibilityNotes must be at most 1000 characters');
+  return trimmed === '' ? null : trimmed;
+}
+
 module.exports = {
+  parseAccessibilityNotes,
   HttpError,
   asyncHandler,
   EMAIL_RE,

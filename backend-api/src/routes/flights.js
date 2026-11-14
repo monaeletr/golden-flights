@@ -1,19 +1,10 @@
 const express = require('express');
 const { pool } = require('../db');
 const { HttpError, asyncHandler, parseId } = require('../utils');
+const { FLIGHT_COLUMNS } = require('../flightSql');
+const { calculateCharges } = require('../services/pricing');
 
 const router = express.Router();
-
-const FLIGHT_COLUMNS = `
-  f.flight_id AS "flightId",
-  f.flight_number AS "flightNumber",
-  f.airline,
-  f.departure_city AS "departureCity",
-  f.arrival_city AS "arrivalCity",
-  f.departure_datetime AS "departureDatetime",
-  f.arrival_datetime AS "arrivalDatetime",
-  f.base_price AS "basePrice",
-  f.status`;
 
 // UI-05: a seat is available if it is not in a non-cancelled booking.
 const SEAT_AVAILABLE_SQL = `NOT EXISTS (
@@ -91,6 +82,34 @@ router.get(
     );
     if (!flight) throw new HttpError(404, 'Flight not found');
     res.json({ flight });
+  })
+);
+
+// UI-06: price breakdown shown before the passenger pays. GET /api/flights/:flightId/quote?seatId=12
+router.get(
+  '/:flightId/quote',
+  asyncHandler(async (req, res) => {
+    const flightId = parseId(req.params.flightId, 'flightId');
+    const { rows: [flight] } = await pool.query('SELECT flight_id, base_price FROM flights WHERE flight_id = $1', [flightId]);
+    if (!flight) throw new HttpError(404, 'Flight not found');
+
+    let seat = null;
+    if (req.query.seatId !== undefined) {
+      const seatId = parseId(req.query.seatId, 'seatId');
+      ({ rows: [seat = null] } = await pool.query(
+        `SELECT seat_id AS "seatId", seat_number AS "seatNumber", seat_class AS "seatClass", seat_fee AS "seatFee"
+           FROM seats WHERE seat_id = $1 AND flight_id = $2`,
+        [seatId, flightId]
+      ));
+      if (!seat) throw new HttpError(400, 'That seat does not belong to this flight');
+    }
+
+    const { charges, total } = calculateCharges({
+      basePrice: flight.base_price,
+      seatFee: seat ? seat.seatFee : 0,
+      seatNumber: seat ? seat.seatNumber : null,
+    });
+    res.json({ flightId, seat, charges, total });
   })
 );
 

@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
 const { authenticate } = require('../middleware/auth');
+const { permissionsFor } = require('../middleware/permissions');
 const { HttpError, asyncHandler, EMAIL_RE } = require('../utils');
 
 const router = express.Router();
@@ -15,6 +16,7 @@ const toUser = (row) => ({
   role: row.role,
   autoDeleteEnabled: row.auto_delete_enabled,
   createdAt: row.created_at,
+  permissions: permissionsFor(row.role), // UI-02: lets the front end show or hide features
 });
 
 const signToken = (user) =>

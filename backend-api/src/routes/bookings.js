@@ -1,13 +1,16 @@
 const express = require('express');
 const { pool, withTransaction } = require('../db');
 const { authenticate } = require('../middleware/auth');
+const { can } = require('../middleware/permissions');
 const {
   HttpError,
   asyncHandler,
   parseId,
+  parseAccessibilityNotes,
   generateBookingReference,
   generateReceiptNumber,
 } = require('../utils');
+const { calculateCharges, replaceCharges } = require('../services/pricing');
 const paymentGateway = require('../services/paymentGateway');
 
 const router = express.Router();
@@ -18,6 +21,7 @@ const BOOKING_SELECT = `
          b.booking_reference AS "bookingReference",
          b.user_id AS "userId",
          b.status,
+         b.accessibility_notes AS "accessibilityNotes",
          b.booked_at AS "bookedAt",
          b.updated_at AS "updatedAt",
          json_build_object(
@@ -47,25 +51,53 @@ const BOOKING_SELECT = `
             FROM payments p
            WHERE p.booking_id = b.booking_id
            ORDER BY p.payment_id DESC
-           LIMIT 1) AS payment
+           LIMIT 1) AS payment,
+         COALESCE((SELECT json_agg(json_build_object(
+                                     'chargeId', c.charge_id,
+                                     'chargeType', c.charge_type,
+                                     'description', c.description,
+                                     'amount', c.amount
+                                   ) ORDER BY c.charge_id)
+                     FROM booking_charges c
+                    WHERE c.booking_id = b.booking_id), '[]'::json) AS charges,
+         COALESCE((SELECT SUM(c.amount) FROM booking_charges c WHERE c.booking_id = b.booking_id), 0) AS "totalPrice",
+         COALESCE((SELECT SUM(p.amount) FROM payments p
+                    WHERE p.booking_id = b.booking_id AND p.status = 'Paid'), 0) AS "amountPaid"
     FROM bookings b
     JOIN flights f ON f.flight_id = b.flight_id
     LEFT JOIN seats s ON s.seat_id = b.seat_id`;
 
-async function fetchBooking(db, whereSql, params) {
-  const { rows } = await db.query(`${BOOKING_SELECT} WHERE ${whereSql}`, params);
-  return rows[0] || null;
+// UI-06: groups the money fields into one "pricing" object.
+// balanceDue > 0 means the passenger still owes money (for example after choosing a pricier seat);
+// it is null for cancelled bookings and for older bookings that have no charge rows.
+function shapeBooking(row) {
+  if (!row) return null;
+  const { charges, totalPrice, amountPaid, ...booking } = row;
+  const hasCharges = charges.length > 0;
+  booking.pricing = {
+    charges,
+    total: totalPrice,
+    paid: amountPaid,
+    balanceDue:
+      hasCharges && booking.status !== 'Cancelled' ? Math.round((totalPrice - amountPaid) * 100) / 100 : null,
+  };
+  return booking;
 }
 
-// Passengers can only see their own bookings; staff can see all. Hide existence otherwise.
+async function fetchBooking(db, whereSql, params) {
+  const { rows } = await db.query(`${BOOKING_SELECT} WHERE ${whereSql}`, params);
+  return shapeBooking(rows[0]);
+}
+
+// UI-02: passengers only see their own bookings; roles with bookings:read:any see all.
+// Otherwise respond 404 so the existence of other people's bookings isn't revealed.
 function assertCanView(booking, user) {
-  if (!booking || (booking.userId !== user.userId && user.role !== 'Staff')) {
+  if (!booking || (booking.userId !== user.userId && !can(user.role, 'bookings:read:any'))) {
     throw new HttpError(404, 'Booking not found');
   }
 }
 
-const isSeatTakenError = (err) =>
-  err.code === '23505' && err.constraint === 'uq_bookings_flight_seat';
+const isSeatTakenError = (err) => err.code === '23505' && err.constraint === 'uq_bookings_flight_seat';
 
 // UI-03: manage bookings.
 // GET /api/bookings?view=current|previous|all   (staff may add &userId=)
@@ -82,7 +114,7 @@ router.get(
     const where = ['TRUE'];
     const params = [];
     let targetUserId = req.user.userId;
-    if (req.user.role === 'Staff') {
+    if (can(req.user.role, 'bookings:read:any')) {
       targetUserId = req.query.userId ? parseId(req.query.userId, 'userId') : null;
     }
     if (targetUserId !== null) {
@@ -100,7 +132,7 @@ router.get(
     }
 
     const { rows } = await pool.query(`${BOOKING_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${orderBy}`, params);
-    res.json({ bookings: rows });
+    res.json({ bookings: rows.map(shapeBooking) });
   })
 );
 
@@ -127,9 +159,10 @@ router.get(
 );
 
 // UI-09: book a flight (optionally with a seat) and pay in one step.
-// Body: { flightId, seatId?, paymentToken }
+// Body: { flightId, seatId?, accessibilityNotes?, paymentToken }
 //
-// 1. Reserve: create the booking (seat held) + a Pending payment in one transaction.
+// 1. Reserve: create the booking (seat held), its price breakdown (UI-06) and a Pending payment
+//    for the total, in one transaction.
 // 2. Charge the gateway (outside the transaction, so no DB locks are held during the network call).
 // 3. Finalize: mark Paid + receipt number, or mark Failed and cancel the booking to free the seat.
 router.post(
@@ -137,6 +170,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const flightId = parseId(req.body?.flightId, 'flightId');
     const seatId = req.body?.seatId == null ? null : parseId(req.body.seatId, 'seatId');
+    const accessibilityNotes = parseAccessibilityNotes(req.body?.accessibilityNotes); // UI-04
     const { paymentToken } = req.body || {};
     if (typeof paymentToken !== 'string' || !paymentToken) {
       throw new HttpError(400, 'paymentToken is required');
@@ -153,11 +187,12 @@ router.post(
           throw new HttpError(409, 'This flight has already departed');
         }
 
+        let seat = null;
         if (seatId !== null) {
-          const { rows: [seat] } = await client.query(
-            'SELECT seat_id FROM seats WHERE seat_id = $1 AND flight_id = $2',
+          ({ rows: [seat = null] } = await client.query(
+            'SELECT seat_id, seat_number, seat_fee FROM seats WHERE seat_id = $1 AND flight_id = $2',
             [seatId, flightId]
-          );
+          ));
           if (!seat) throw new HttpError(400, 'That seat does not belong to this flight');
 
           const { rows: [taken] } = await client.query(
@@ -173,24 +208,28 @@ router.post(
         for (let attempt = 0; attempt < 5 && !booking; attempt++) {
           reference = generateBookingReference();
           ({ rows: [booking] } = await client.query(
-            `INSERT INTO bookings (booking_reference, user_id, flight_id, seat_id, status)
-             VALUES ($1, $2, $3, $4, 'Confirmed')
+            `INSERT INTO bookings (booking_reference, user_id, flight_id, seat_id, status, accessibility_notes)
+             VALUES ($1, $2, $3, $4, 'Confirmed', $5)
              ON CONFLICT (booking_reference) DO NOTHING
              RETURNING booking_id`,
-            [reference, req.user.userId, flightId, seatId]
+            [reference, req.user.userId, flightId, seatId, accessibilityNotes]
           ));
         }
         if (!booking) throw new HttpError(500, 'Could not generate a booking reference');
 
-        // Sprint 1 charges the base price only. Sprint 2: add the chosen seat's seat_fee here.
-        const amount = flight.base_price;
+        const { charges, total } = calculateCharges({
+          basePrice: flight.base_price,
+          seatFee: seat ? seat.seat_fee : 0,
+          seatNumber: seat ? seat.seat_number : null,
+        });
+        await replaceCharges(client, booking.booking_id, charges);
 
         const { rows: [payment] } = await client.query(
           `INSERT INTO payments (booking_id, amount, status) VALUES ($1, $2, 'Pending') RETURNING payment_id`,
-          [booking.booking_id, amount]
+          [booking.booking_id, total]
         );
 
-        return { bookingId: booking.booking_id, bookingReference: reference, paymentId: payment.payment_id, amount };
+        return { bookingId: booking.booking_id, bookingReference: reference, paymentId: payment.payment_id, amount: total };
       });
     } catch (err) {
       // Two people picking the same seat at once: the UNIQUE (flight_id, seat_id) constraint decides.
@@ -240,6 +279,8 @@ router.post(
 );
 
 // UI-05: choose or change the seat on an existing booking. Body: { seatId }
+// The price breakdown is recalculated for the new seat. Any difference is shown as pricing.balanceDue;
+// this sprint does not charge or refund that difference automatically.
 router.put(
   '/:bookingId/seat',
   asyncHandler(async (req, res) => {
@@ -249,7 +290,8 @@ router.put(
     try {
       await withTransaction(async (client) => {
         const { rows: [b] } = await client.query(
-          `SELECT b.booking_id, b.user_id, b.flight_id, b.seat_id, b.status, f.departure_datetime
+          `SELECT b.booking_id, b.user_id, b.flight_id, b.seat_id, b.status,
+                  f.departure_datetime, f.base_price
              FROM bookings b
              JOIN flights f ON f.flight_id = b.flight_id
             WHERE b.booking_id = $1
@@ -261,7 +303,7 @@ router.put(
         if (new Date(b.departure_datetime) <= new Date()) throw new HttpError(409, 'This flight has already departed');
 
         const { rows: [seat] } = await client.query(
-          'SELECT seat_id FROM seats WHERE seat_id = $1 AND flight_id = $2',
+          'SELECT seat_id, seat_number, seat_fee FROM seats WHERE seat_id = $1 AND flight_id = $2',
           [seatId, b.flight_id]
         );
         if (!seat) throw new HttpError(400, 'That seat does not belong to this flight');
@@ -276,11 +318,52 @@ router.put(
             WHERE booking_id = $1`,
           [bookingId, seatId]
         );
+
+        const { charges } = calculateCharges({
+          basePrice: b.base_price,
+          seatFee: seat.seat_fee,
+          seatNumber: seat.seat_number,
+        });
+        await replaceCharges(client, bookingId, charges);
       });
     } catch (err) {
       if (isSeatTakenError(err)) throw new HttpError(409, 'That seat was just taken. Please choose another.');
       throw err;
     }
+
+    const booking = await fetchBooking(pool, 'b.booking_id = $1', [bookingId]);
+    res.json({ booking });
+  })
+);
+
+// UI-04: add, change or clear accessibility notes. Body: { accessibilityNotes: "text" | "" | null }
+router.patch(
+  '/:bookingId/accessibility',
+  asyncHandler(async (req, res) => {
+    const bookingId = parseId(req.params.bookingId, 'bookingId');
+    if (!req.body || !('accessibilityNotes' in req.body)) {
+      throw new HttpError(400, 'accessibilityNotes is required (use "" to clear)');
+    }
+    const notes = parseAccessibilityNotes(req.body.accessibilityNotes);
+
+    await withTransaction(async (client) => {
+      const { rows: [b] } = await client.query(
+        `SELECT b.booking_id, b.user_id, b.status, f.departure_datetime
+           FROM bookings b
+           JOIN flights f ON f.flight_id = b.flight_id
+          WHERE b.booking_id = $1
+            FOR UPDATE OF b`,
+        [bookingId]
+      );
+      if (!b || b.user_id !== req.user.userId) throw new HttpError(404, 'Booking not found');
+      if (b.status === 'Cancelled') throw new HttpError(409, 'This booking has been cancelled');
+      if (new Date(b.departure_datetime) <= new Date()) throw new HttpError(409, 'This flight has already departed');
+
+      await client.query(`UPDATE bookings SET accessibility_notes = $2, updated_at = now() WHERE booking_id = $1`, [
+        bookingId,
+        notes,
+      ]);
+    });
 
     const booking = await fetchBooking(pool, 'b.booking_id = $1', [bookingId]);
     res.json({ booking });
@@ -302,7 +385,7 @@ router.post(
             FOR UPDATE OF b`,
         [bookingId]
       );
-      if (!b || (b.user_id !== req.user.userId && req.user.role !== 'Staff')) {
+      if (!b || (b.user_id !== req.user.userId && !can(req.user.role, 'bookings:cancel:any'))) {
         throw new HttpError(404, 'Booking not found');
       }
       if (b.status === 'Cancelled') throw new HttpError(409, 'This booking is already cancelled');

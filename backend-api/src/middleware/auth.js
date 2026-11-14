@@ -1,23 +1,32 @@
 const jwt = require('jsonwebtoken');
+const { pool } = require('../db');
 const { HttpError } = require('../utils');
 
-function authenticate(req, res, next) {
+// Verifies the token, then loads the user's CURRENT role from the database, so a role change
+// (for example demoting a staff member) takes effect immediately instead of when the token expires.
+async function authenticate(req, res, next) {
   const [scheme, token] = (req.headers.authorization || '').split(' ');
   if (scheme !== 'Bearer' || !token) {
     return next(new HttpError(401, 'Authentication required'));
   }
+
+  let payload;
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = { userId: Number(payload.sub), role: payload.role };
-    next();
+    payload = jwt.verify(token, process.env.JWT_SECRET);
   } catch {
-    next(new HttpError(401, 'Invalid or expired token'));
+    return next(new HttpError(401, 'Invalid or expired token'));
+  }
+
+  try {
+    const { rows: [user] } = await pool.query('SELECT user_id, role FROM users WHERE user_id = $1', [
+      Number(payload.sub),
+    ]);
+    if (!user) return next(new HttpError(401, 'Account no longer exists'));
+    req.user = { userId: user.user_id, role: user.role };
+    next();
+  } catch (err) {
+    next(err);
   }
 }
 
-const requireRole = (...roles) => (req, res, next) =>
-  roles.includes(req.user?.role)
-    ? next()
-    : next(new HttpError(403, 'You do not have permission to do that'));
-
-module.exports = { authenticate, requireRole };
+module.exports = { authenticate };

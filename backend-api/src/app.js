@@ -30,6 +30,7 @@ const authLimiter = rateLimit({
 app.use('/api/auth', authLimiter, require('./routes/auth'));
 app.use('/api/flights', require('./routes/flights'));
 app.use('/api/bookings', require('./routes/bookings'));
+app.use('/api/staff', require('./routes/staff')); // staff only (UI-02, REP-03/04/05)
 
 app.use((req, res, next) => next(new HttpError(404, 'Route not found')));
 app.use(errorHandler);
